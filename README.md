@@ -1,98 +1,328 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# High-Scale Energy Ingestion Engine
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A high-performance telemetry ingestion system designed to handle **10,000+ Smart Meters and EV Fleets** with **60-second heartbeat intervals**, processing approximately **14.4 million records daily**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Table of Contents
 
-## Description
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Data Strategy](#data-strategy)
+- [API Endpoints](#api-endpoints)
+- [Quick Start](#quick-start)
+- [Development](#development)
+- [Performance Considerations](#performance-considerations)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Overview
 
-## Project setup
+This system ingests two independent telemetry streams:
 
-```bash
-$ npm install
+1. **Smart Meter Stream** (Grid Side): Measures AC power consumption from the utility grid
+2. **Vehicle Stream** (Vehicle Side): Reports DC energy delivered to EV batteries and State of Charge
+
+### Power Loss Thesis
+
+In real-world scenarios, AC Consumed is always higher than DC Delivered due to conversion losses. An efficiency ratio below 85% indicates potential hardware faults or energy leakage.
+
+```
+Efficiency = (DC Delivered / AC Consumed) × 100%
 ```
 
-## Compile and run the project
+## Architecture
 
-```bash
-# development
-$ npm run start
+### System Design
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```
+┌─────────────────┐     ┌─────────────────┐
+│   Smart Meters  │     │   EV Vehicles   │
+│   (10,000+)     │     │   (10,000+)     │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         │ 60s heartbeats        │ 60s heartbeats
+         │                       │
+         ▼                       ▼
+┌─────────────────────────────────────────────────┐
+│              Ingestion Layer (NestJS)           │
+│  ┌───────────────────────────────────────────┐  │
+│  │         Polymorphic Validation            │  │
+│  │  (class-validator / class-transformer)    │  │
+│  └───────────────────────────────────────────┘  │
+│                      │                          │
+│         ┌────────────┴────────────┐             │
+│         ▼                         ▼             │
+│  ┌─────────────┐          ┌─────────────┐       │
+│  │  COLD PATH  │          │  HOT PATH   │       │
+│  │  (INSERT)   │          │  (UPSERT)   │       │
+│  └─────────────┘          └─────────────┘       │
+└─────────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────┐
+│                PostgreSQL                        │
+│  ┌─────────────────────┐  ┌──────────────────┐  │
+│  │   Historical Store  │  │  Operational     │  │
+│  │   (Cold Storage)    │  │  Store (Hot)     │  │
+│  │                     │  │                  │  │
+│  │  • meter_readings   │  │ • meter_current  │  │
+│  │  • vehicle_readings │  │   _state         │  │
+│  │                     │  │ • vehicle_current│  │
+│  │  (Append-only)      │  │   _state         │  │
+│  │                     │  │                  │  │
+│  │  Indexed on:        │  │ (UPSERT on      │  │
+│  │  (device_id,        │  │  unique key)    │  │
+│  │   timestamp)        │  │                  │  │
+│  └─────────────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────┘
 ```
 
-## Run tests
+### Technology Stack
 
-```bash
-# unit tests
-$ npm run test
+- **Framework**: NestJS (TypeScript)
+- **Database**: PostgreSQL
+- **ORM**: Prisma
+- **Validation**: class-validator, class-transformer
+- **API Docs**: Swagger/OpenAPI
+- **Containerization**: Docker
 
-# e2e tests
-$ npm run test:e2e
+## Data Strategy
 
-# test coverage
-$ npm run test:cov
+### Hot vs Cold Storage
+
+| Aspect | Cold Storage (Historical) | Hot Storage (Operational) |
+|--------|---------------------------|---------------------------|
+| **Purpose** | Long-term audit trail | Dashboard/real-time status |
+| **Operation** | INSERT (append-only) | UPSERT (atomic update) |
+| **Tables** | `meter_readings`, `vehicle_readings` | `meter_current_state`, `vehicle_current_state` |
+| **Volume** | Billions of rows over time | One row per device |
+| **Query Pattern** | Time-range analytics | Single-row lookups |
+
+### Data Correlation
+
+Vehicles are associated with meters to enable efficiency correlation:
+
+```typescript
+// Associate vehicle with meter
+PATCH /v1/ingestion/vehicle/:vehicleId/meter/:meterId
 ```
 
-## Deployment
+This linkage allows the analytics endpoint to correlate AC consumption from the grid with DC delivery to the vehicle battery.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### Handling 14.4 Million Records Daily
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+**Calculation**: 10,000 devices × 2 streams × 60 readings/hour × 24 hours = **28.8M readings/day**
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+The system handles this volume through:
+
+1. **Indexed Queries**: Composite indexes on `(device_id, timestamp)` enable efficient range scans
+2. **Batch Ingestion**: Bulk insert endpoints for high-throughput scenarios
+3. **Dual-Write Pattern**: Separate hot/cold paths prevent read/write contention
+4. **Connection Pooling**: Prisma manages connection pooling for PostgreSQL
+
+### Database Schema
+
+```prisma
+// Cold Storage - Append-only time-series
+model MeterReading {
+  id            String   @id @default(uuid())
+  meterId       String   @map("meter_id")
+  kwhConsumedAc Float    @map("kwh_consumed_ac")
+  voltage       Float
+  timestamp     DateTime
+  receivedAt    DateTime @default(now())
+
+  @@index([meterId, timestamp])  // Composite index for range queries
+  @@index([timestamp])           // For time-based partitioning
+}
+
+// Hot Storage - Current state
+model MeterCurrentState {
+  meterId       String   @unique @map("meter_id")
+  kwhConsumedAc Float    @map("kwh_consumed_ac")
+  voltage       Float
+  lastTimestamp DateTime @map("last_timestamp")
+}
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## API Endpoints
 
-## Resources
+### Ingestion Endpoints
 
-Check out a few resources that may come in handy when working with NestJS:
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/v1/ingestion/meter` | Ingest single meter reading |
+| POST | `/v1/ingestion/vehicle` | Ingest single vehicle reading |
+| POST | `/v1/ingestion/meter/batch` | Batch ingest meter readings |
+| POST | `/v1/ingestion/vehicle/batch` | Batch ingest vehicle readings |
+| PATCH | `/v1/ingestion/vehicle/:vehicleId/meter/:meterId` | Associate vehicle with meter |
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+### Analytics Endpoints
 
-## Support
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/v1/analytics/performance/:vehicleId` | 24-hour performance summary |
+| GET | `/v1/analytics/current/:vehicleId` | Current vehicle state (hot storage) |
+| GET | `/v1/analytics/fleet/stats` | Fleet-wide statistics |
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+### Example: Performance Summary Response
 
-## Stay in touch
+```json
+{
+  "vehicleId": "VEH-001",
+  "meterId": "METER-001",
+  "periodStart": "2024-01-14T10:30:00.000Z",
+  "periodEnd": "2024-01-15T10:30:00.000Z",
+  "totalAcConsumed": 125.5,
+  "totalDcDelivered": 108.2,
+  "efficiencyRatio": 86.2,
+  "avgBatteryTemp": 32.5,
+  "vehicleReadingCount": 1440,
+  "meterReadingCount": 1440,
+  "efficiencyStatus": "HEALTHY"
+}
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+## Quick Start
+
+### Using Docker Compose
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd energy-ingestion-engine
+
+# Start services
+docker-compose up -d
+
+# The application will be available at:
+# - API: http://localhost:3000
+# - Swagger Docs: http://localhost:3000/api
+```
+
+### Local Development
+
+```bash
+# Install dependencies
+npm install
+
+# Generate Prisma client
+npm run prisma:generate
+
+# Run migrations
+npm run prisma:migrate
+
+# Start development server
+npm run start:dev
+```
+
+## Development
+
+### Project Structure
+
+```
+src/
+├── analytics/           # Analytics module
+│   ├── dto/            # Response DTOs
+│   ├── analytics.controller.ts
+│   ├── analytics.service.ts
+│   └── analytics.module.ts
+├── ingestion/          # Ingestion module
+│   ├── dto/            # Request DTOs with validation
+│   ├── ingestion.controller.ts
+│   ├── ingestion.service.ts
+│   └── ingestion.module.ts
+├── prisma/             # Database module
+│   ├── prisma.service.ts
+│   └── prisma.module.ts
+├── app.module.ts       # Root module
+└── main.ts             # Application entry
+```
+
+### Scripts
+
+```bash
+npm run start:dev        # Development with watch mode
+npm run build            # Production build
+npm run start:prod       # Production start
+npm run prisma:studio    # Prisma database GUI
+npm run prisma:migrate   # Run migrations
+npm run test             # Run unit tests
+npm run test:e2e         # Run E2E tests
+```
+
+### Environment Variables
+
+```env
+DATABASE_URL=postgresql://energy:energy@localhost:5432/energy_db
+PORT=3000
+NODE_ENV=development
+```
+
+## Performance Considerations
+
+### Query Optimization
+
+The analytics endpoint avoids full table scans by:
+
+1. **Using composite indexes**: Queries filter by `(vehicleId, timestamp)` which uses the index
+2. **Bounded time ranges**: Always queries within a specific 24-hour window
+3. **Hot storage lookups**: Current state queries use unique index for O(1) access
+
+### Scaling Strategies
+
+For production deployment with higher volumes:
+
+1. **Table Partitioning**: Partition historical tables by month/week
+2. **Read Replicas**: Route analytics queries to read replicas
+3. **TimescaleDB**: Consider TimescaleDB extension for native time-series optimization
+4. **Message Queue**: Add Kafka/RabbitMQ for ingestion buffering
+5. **Horizontal Scaling**: Deploy multiple app instances behind load balancer
+
+### Efficiency Thresholds
+
+| Efficiency | Status | Indication |
+|------------|--------|------------|
+| ≥ 85% | HEALTHY | Normal operation |
+| 75-85% | WARNING | Potential issues |
+| < 75% | CRITICAL | Hardware fault likely |
+
+## Testing
+
+### Sample Ingestion Requests
+
+**Meter Telemetry:**
+```bash
+curl -X POST http://localhost:3000/v1/ingestion/meter \
+  -H "Content-Type: application/json" \
+  -d '{
+    "meterId": "METER-001",
+    "kwhConsumedAc": 125.5,
+    "voltage": 230.5,
+    "timestamp": "2024-01-15T10:30:00.000Z"
+  }'
+```
+
+**Vehicle Telemetry:**
+```bash
+curl -X POST http://localhost:3000/v1/ingestion/vehicle \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vehicleId": "VEH-001",
+    "soc": 75.5,
+    "kwhDeliveredDc": 45.2,
+    "batteryTemp": 35.0,
+    "timestamp": "2024-01-15T10:30:00.000Z"
+  }'
+```
+
+**Associate Vehicle with Meter:**
+```bash
+curl -X PATCH http://localhost:3000/v1/ingestion/vehicle/VEH-001/meter/METER-001
+```
+
+**Get Performance Summary:**
+```bash
+curl http://localhost:3000/v1/analytics/performance/VEH-001
+```
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+This project is proprietary and confidential.

@@ -1,14 +1,137 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for High-Scale Energy Ingestion Engine
+// Implements hot/cold storage strategy for 14.4M+ daily records
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// DEVICE REGISTRY
+// =============================================================================
+
+/// Smart Meter device registration
+model Meter {
+  id        String   @id @default(uuid())
+  meterId   String   @unique @map("meter_id")
+  name      String?
+  location  String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  readings     MeterReading[]
+  currentState MeterCurrentState?
+  vehicles     Vehicle[]
+
+  @@map("meters")
+}
+
+/// Electric Vehicle registration
+model Vehicle {
+  id           String   @id @default(uuid())
+  vehicleId    String   @unique @map("vehicle_id")
+  name         String?
+  batteryCapacity Float? @map("battery_capacity") // kWh
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Association with meter (for efficiency correlation)
+  meterId      String?  @map("meter_id")
+  meter        Meter?   @relation(fields: [meterId], references: [meterId])
+
+  // Relations
+  readings     VehicleReading[]
+  currentState VehicleCurrentState?
+
+  @@index([meterId])
+  @@map("vehicles")
+}
+
+// =============================================================================
+// COLD STORAGE (Historical) - Append-only time-series data
+// Optimized for write-heavy ingestion and batch analytics
+// =============================================================================
+
+/// Historical meter telemetry readings (COLD STORAGE)
+/// Append-only INSERT strategy - never update, only insert
+model MeterReading {
+  id             String   @id @default(uuid())
+  meterId        String   @map("meter_id")
+  kwhConsumedAc  Float    @map("kwh_consumed_ac")  // AC energy from grid
+  voltage        Float                              // Grid voltage
+  timestamp      DateTime                           // Device timestamp
+  receivedAt     DateTime @default(now()) @map("received_at") // Server receive time
+
+  // Relation to meter registry
+  meter          Meter    @relation(fields: [meterId], references: [meterId])
+
+  // Performance indexes for time-series queries
+  // Composite index enables efficient range queries by device + time
+  @@index([meterId, timestamp])
+  @@index([timestamp])
+  @@map("meter_readings")
+}
+
+/// Historical vehicle telemetry readings (COLD STORAGE)
+/// Append-only INSERT strategy - never update, only insert
+model VehicleReading {
+  id             String   @id @default(uuid())
+  vehicleId      String   @map("vehicle_id")
+  soc            Float                              // State of Charge (0-100%)
+  kwhDeliveredDc Float    @map("kwh_delivered_dc") // DC energy to battery
+  batteryTemp    Float    @map("battery_temp")     // Battery temperature (°C)
+  timestamp      DateTime                           // Device timestamp
+  receivedAt     DateTime @default(now()) @map("received_at") // Server receive time
+
+  // Relation to vehicle registry
+  vehicle        Vehicle  @relation(fields: [vehicleId], references: [vehicleId])
+
+  // Performance indexes for time-series queries
+  // Composite index enables efficient range queries by device + time
+  @@index([vehicleId, timestamp])
+  @@index([timestamp])
+  @@map("vehicle_readings")
+}
+
+// =============================================================================
+// HOT STORAGE (Operational) - Current state for dashboards
+// Optimized for fast reads - UPSERT strategy
+// =============================================================================
+
+/// Current meter state (HOT STORAGE)
+/// UPSERT strategy - always update to latest value
+model MeterCurrentState {
+  id              String   @id @default(uuid())
+  meterId         String   @unique @map("meter_id")
+  kwhConsumedAc   Float    @map("kwh_consumed_ac")
+  voltage         Float
+  lastTimestamp   DateTime @map("last_timestamp")  // Last reading timestamp
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relation to meter registry
+  meter           Meter    @relation(fields: [meterId], references: [meterId])
+
+  @@map("meter_current_state")
+}
+
+/// Current vehicle state (HOT STORAGE)
+/// UPSERT strategy - always update to latest value
+model VehicleCurrentState {
+  id              String   @id @default(uuid())
+  vehicleId       String   @unique @map("vehicle_id")
+  soc             Float                              // Current battery %
+  kwhDeliveredDc  Float    @map("kwh_delivered_dc")
+  batteryTemp     Float    @map("battery_temp")
+  lastTimestamp   DateTime @map("last_timestamp")   // Last reading timestamp
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relation to vehicle registry
+  vehicle         Vehicle  @relation(fields: [vehicleId], references: [vehicleId])
+
+  @@map("vehicle_current_state")
 }
